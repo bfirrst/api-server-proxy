@@ -1,6 +1,7 @@
-/* ─────────── server.js ───────────
-   Express + GramJS + SOCKS/HTTP proxy
-─────────────────────────────────── */
+/* ────────── server.js ──────────
+   Express + GramJS + proxy support
+   (с отладочными логами proxyRaw / proxyConf)
+────────────────────────────────── */
 const express = require("express");
 const { StringSession } = require("telegram/sessions");
 const { TelegramClient } = require("telegram");
@@ -9,15 +10,15 @@ const { URL } = require("url");
 const app = express();
 app.use(express.json());
 
-/* Telegram API-ключи */
+/* Telegram API keys — фиксированные */
 const apiId   = 2040;
 const apiHash = "b18441a1ff607e10a989891a5462e627";
 
-/* ── helpers ───────────────────────────────────────── */
+/* ── helper: преобразуем proxy в формат GramJS ── */
 function toGramJsProxy(input) {
   if (!input) return null;
 
-  /* Старый массив формата [code, host, port, "True", user, pass] */
+  /* Формат вида [code, host, port, "True", user, pass] — из таблицы */
   if (Array.isArray(input)) {
     const [code, host, port, authFlag, user = "", pass = ""] = input;
     return authFlag === "True"
@@ -29,27 +30,32 @@ function toGramJsProxy(input) {
   const u = new URL(String(input));
   const host = u.hostname;
   const port = Number(u.port || 1080);
-  if (!host || !port) return null;               // нет host / port → без прокси
+  if (!host || !port) return null;          // некорректно → без прокси
 
   const protoMap = { "socks4:": 1, "socks5:": 2, "http:": 3 };
-  const code = protoMap[u.protocol] || 2;        // default SOCKS5
+  const code = protoMap[u.protocol] || 2;   // по умолчанию SOCKS5
 
   return (u.username || u.password)
     ? [code, host, port, u.username, u.password]
     : [code, host, port];
 }
 
+/* ── создаём клиента ── */
 async function createClient(sessionString, proxyRaw) {
-  const proxy = toGramJsProxy(proxyRaw);
+  const proxyConf = toGramJsProxy(proxyRaw);
+  /* ─ debug ───────────────────────────── */
+  console.log("DEBUG proxyRaw :", proxyRaw);
+  console.log("DEBUG proxyConf:", proxyConf);
+  /* ───────────────────────────────────── */
   return new TelegramClient(
     new StringSession(sessionString),
     apiId,
     apiHash,
-    { proxy, connectionRetries: 3 }
+    { proxy: proxyConf, connectionRetries: 3 },
   );
 }
 
-/* ── routes ────────────────────────────────────────── */
+/* ── routes ───────────────────────────── */
 app.get("/", (_, res) => res.send("Server is running ✅"));
 
 app.post("/send", async (req, res) => {
@@ -60,7 +66,7 @@ app.post("/send", async (req, res) => {
   try {
     const client = await createClient(sessionString, proxy);
     await client.start();
-    await client.sendMessage(username, message);
+    await client.sendMessage(username, { message });
     await client.disconnect();
     res.json({ success: true });
   } catch (err) {
@@ -77,7 +83,7 @@ app.post("/bio", async (req, res) => {
     const client = await createClient(sessionString, proxy);
     await client.connect();
     const entity = await client.getEntity(username);
-    const bio = entity?.about || "";             // для ботов botInfo?.description
+    const bio = entity?.about || entity?.botInfo?.description || "";
     await client.disconnect();
     res.json({ success: true, bio });
   } catch (err) {
@@ -101,6 +107,6 @@ app.post("/validate", async (req, res) => {
   }
 });
 
-/* ── launch ────────────────────────────────────────── */
+/* ── launch ───────────────────────────── */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log("Server listening on port", port));
