@@ -1,6 +1,6 @@
 /* ───────────── server.js ─────────────
-   Express + GramJS + proxy-support
-   (корректный формат прокси + DEBUG-лог)
+   Express + GramJS + авторизованный proxy
+   (исправлены SOCKS-коды и DEBUG-лог)
 ────────────────────────────────────── */
 
 const express            = require("express");
@@ -15,33 +15,38 @@ app.use(express.json());
 const apiId   = 2040;
 const apiHash = "b18441a1ff607e10a989891a5462e627";
 
-/* ── helper: переводим proxy в формат GramJS ── */
+/* ── helper ── преобразуем proxy в формат, который понимает GramJS → socks */
 function toGramJsProxy(raw) {
   if (!raw) return null;
 
-  /* 1) массив из Google-таблицы: [code, host, port, "True", user, pass] */
+  /* 1) массив из таблицы: [code, host, port, "True", user, pass] */
   if (Array.isArray(raw)) {
-    const [code, host, port, flag, user = "", pass = ""] = raw;
+    let [code, host, port, flag, user = "", pass = ""] = raw;
+
+    /* старые обозначения: 1→SOCKS4, 2→SOCKS5 ⇒ конвертируем */
+    if (code === 1) code = 4;
+    if (code === 2) code = 5;
+
     return flag === "True"
       ? { socksType: code, ip: host, port, userId: user, password: pass }
       : [code, host, port];
   }
 
-  /* 2) строка-URL: socks5://user:pass@host:port  */
+  /* 2) строка-URL вида socks5://user:pass@host:port */
   try {
-    const u    = new URL(String(raw));
-    const host = u.hostname;
-    const port = Number(u.port || 1080);
-    if (!host || !port) return null;                 // нет host или port
+    const u     = new URL(String(raw));
+    const host  = u.hostname;
+    const port  = Number(u.port || 1080);
+    if (!host || !port) return null;
 
-    const protoMap = { "socks4:": 1, "socks5:": 2, "http:": 3 };
-    const code = protoMap[u.protocol] || 2;          // default SOCKS5
+    const protoMap = { "socks4:": 4, "socks5:": 5, "http:": 3 };
+    const code = protoMap[u.protocol] || 5;         // default SOCKS5
 
     return (u.username || u.password)
       ? { socksType: code, ip: host, port, userId: u.username, password: u.password }
       : [code, host, port];
-  } catch {               // строка не распарсилась
-    return null;
+  } catch {
+    return null;                                    // некорректная строка
   }
 }
 
@@ -49,7 +54,7 @@ function toGramJsProxy(raw) {
 function createClient(sessionString, proxyRaw) {
   const proxyConf = toGramJsProxy(proxyRaw);
 
-  /* DEBUG — показывает raw-строку/массив и конечную конфигурацию */
+  /* DEBUG */
   console.log(
     "DEBUG proxy ▶",
     JSON.stringify({ raw: proxyRaw, conf: proxyConf }, null, 2)
@@ -59,14 +64,13 @@ function createClient(sessionString, proxyRaw) {
     new StringSession(sessionString),
     apiId,
     apiHash,
-    { proxy: proxyConf, connectionRetries: 3 },
+    { proxy: proxyConf, connectionRetries: 3 }
   );
 }
 
-/* ── routes ───────────────────────────────────────── */
+/* ── routes ─────────────────────────── */
 app.get("/", (_, res) => res.send("Server is running ✅"));
 
-/* отправка сообщения */
 app.post("/send", async (req, res) => {
   const { sessionString, username, message, proxy } = req.body;
   if (!sessionString || !username || !message)
@@ -74,7 +78,7 @@ app.post("/send", async (req, res) => {
 
   try {
     const client = createClient(sessionString, proxy);
-    await client.start();                                   // StringSession
+    await client.start();                                     // StringSession
     await client.sendMessage(username, { message });
     await client.disconnect();
     res.json({ success:true });
@@ -83,7 +87,6 @@ app.post("/send", async (req, res) => {
   }
 });
 
-/* получение BIO */
 app.post("/bio", async (req, res) => {
   const { sessionString, username, proxy } = req.body;
   if (!sessionString || !username)
@@ -101,7 +104,6 @@ app.post("/bio", async (req, res) => {
   }
 });
 
-/* валидация сессии */
 app.post("/validate", async (req, res) => {
   const { sessionString, proxy } = req.body;
   if (!sessionString)
@@ -118,6 +120,6 @@ app.post("/validate", async (req, res) => {
   }
 });
 
-/* ── запуск ───────────────────────────────────────── */
+/* ── launch ─────────────────────────── */
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log("Server listening on", port));
